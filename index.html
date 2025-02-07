@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Roti Detector (Enhanced)</title>
+    
+    <script async src="https://docs.opencv.org/3.4.0/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
+    <style>
+        body {
+            background-color: #1a1a1a;
+            color: #00ff00;
+            font-family: 'Courier New', monospace;
+            margin: 20px;
+        }
+        .container {
+            border: 1px solid #00ff00;
+            padding: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .canvas-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            justify-content: center;
+        }
+        .canvas-wrapper {
+            position: relative;
+            margin: 10px;
+        }
+        canvas {
+            border: 1px solid #00ff00;
+            max-width: 100%;
+            background-color: #000; /* Helps visualize the canvas area */
+        }
+        #canvasOverlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+        }
+        .status {
+            border-bottom: 1px solid #00ff00;
+            padding: 5px;
+            margin-bottom: 10px;
+        }
+        input[type="file"] {
+            background: #2a2a2a;
+            color: #00ff00;
+            border: 1px solid #00ff00;
+            padding: 5px;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="status" id="status">:loading opencv.js...</div>
+    <input type="file" id="fileInput" accept="image/*" disabled>
+    <div class="canvas-container">
+        <div class="canvas-wrapper">
+            <canvas id="canvasInput"></canvas>
+            <canvas id="canvasOverlay"></canvas>
+        </div>
+        <canvas id="canvasEdges"></canvas>
+        <canvas id="canvasOutput"></canvas>
+    </div>
+    <div id="result"></div>
+</div>
+
+<script>
+    let inputElement = document.getElementById('fileInput');
+    let statusElement = document.getElementById('status');
+    let resultElement = document.getElementById('result');
+
+    // Desired maximum width/height for the processed image
+    const MAX_WIDTH = 600;
+    const MAX_HEIGHT = 400;
+
+    function onOpenCvReady() {
+        inputElement.disabled = false;
+        statusElement.innerHTML = ':ready';
+    }
+
+    inputElement.addEventListener('change', function(e) {
+        let file = e.target.files[0];
+        if (!file) return;
+
+        let reader = new FileReader();
+        reader.onload = function(event) {
+            let imgElement = new Image();
+            imgElement.onload = function() {
+                // Convert Image to cv.Mat
+                let mat = cv.imread(imgElement);
+
+                // Resize to fit the maximum canvas size while preserving aspect ratio
+                let resized = resizeMat(mat, MAX_WIDTH, MAX_HEIGHT);
+
+                // Process
+                processImage(resized);
+
+                // Cleanup
+                mat.delete();
+                resized.delete();
+            }
+            imgElement.src = event.target.result;
+        }
+        reader.readAsDataURL(file);
+    });
+
+    function resizeMat(mat, maxWidth, maxHeight) {
+        // Calculate ratio to fit within maxWidth / maxHeight
+        let ratio = Math.min(maxWidth / mat.cols, maxHeight / mat.rows);
+        if (ratio >= 1.0) {
+            // No resizing needed if already within limits
+            return mat.clone();
+        }
+        let newWidth = Math.round(mat.cols * ratio);
+        let newHeight = Math.round(mat.rows * ratio);
+
+        let dsize = new cv.Size(newWidth, newHeight);
+        let resized = new cv.Mat();
+        cv.resize(mat, resized, dsize, 0, 0, cv.INTER_AREA);
+        return resized;
+    }
+
+    function processImage(mat) {
+        // Prepare canvases
+        let canvasInput = document.getElementById('canvasInput');
+        let canvasOverlay = document.getElementById('canvasOverlay');
+        let canvasEdges = document.getElementById('canvasEdges');
+        let canvasOutput = document.getElementById('canvasOutput');
+
+        // Make all canvases match the same dimensions as 'mat'
+        canvasInput.width = mat.cols;
+        canvasInput.height = mat.rows;
+        canvasOverlay.width = mat.cols;
+        canvasOverlay.height = mat.rows;
+        canvasEdges.width = mat.cols;
+        canvasEdges.height = mat.rows;
+        canvasOutput.width = mat.cols;
+        canvasOutput.height = mat.rows;
+
+        // Clone and create mats
+        let src = mat.clone();
+        let gray = new cv.Mat();
+        let edges = new cv.Mat();
+        let hierarchy = new cv.Mat();
+        let contours = new cv.MatVector();
+
+        // Convert to gray
+        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+
+        // (A) Morphological operations to improve contour detection
+        let kernel = cv.Mat.ones(3, 3, cv.CV_8U);
+        cv.morphologyEx(gray, gray, cv.MORPH_OPEN, kernel);
+        cv.morphologyEx(gray, gray, cv.MORPH_CLOSE, kernel);
+        kernel.delete();
+
+        // (B) Blur + Canny
+        cv.GaussianBlur(gray, gray, new cv.Size(5, 5), 0);
+        cv.Canny(gray, edges, 50, 150, 3);
+
+        // Find contours
+        cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+        let bestCircularity = 0;
+        let bestContour = -1;
+
+        for (let i = 0; i < contours.size(); ++i) {
+            let contour = contours.get(i);
+            let area = cv.contourArea(contour);
+            let perimeter = cv.arcLength(contour, true);
+
+            if (perimeter === 0) continue;
+
+            let circularity = (4 * Math.PI * area) / (perimeter * perimeter);
+            if (circularity > bestCircularity && circularity <= 1.0) {
+                bestCircularity = circularity;
+                bestContour = i;
+            }
+        }
+
+        // Display input image & edge image
+        cv.imshow('canvasInput', src);
+        cv.imshow('canvasEdges', edges);
+
+        // Draw best contour as a "glowing" line on the overlay
+        let overlayMat = cv.Mat.zeros(mat.rows, mat.cols, cv.CV_8UC4);
+        if (bestContour >= 0) {
+            let score = bestCircularity * 100;
+            resultElement.innerHTML = `:circularity = ${score.toFixed(2)}%`;
+
+            // Draw thick line with partial alpha (outer glow)
+            cv.drawContours(
+                overlayMat,
+                contours,
+                bestContour,
+                new cv.Scalar(0, 255, 255, 100), // bright color with partial alpha
+                6
+            );
+            // Draw thinner line on top (brighter, more opaque)
+            cv.drawContours(
+                overlayMat,
+                contours,
+                bestContour,
+                new cv.Scalar(255, 255, 255, 255), 
+                2
+            );
+
+            // ***** Added color check for "wheatish-white" *****
+            // Create a mask for the best contour and compute the average color.
+            let mask = new cv.Mat.zeros(mat.rows, mat.cols, cv.CV_8UC1);
+            cv.drawContours(mask, contours, bestContour, new cv.Scalar(255), -1);
+            let meanColor = cv.mean(src, mask);
+            mask.delete();
+            // Assume image is in RGBA order: meanColor[0]=R, [1]=G, [2]=B.
+            let r = meanColor[0], g = meanColor[1], b = meanColor[2];
+            // Define the target "wheatish-white" color (approximately RGB 245,222,179).
+            let targetR = 245, targetG = 222, targetB = 179;
+            let dr = r - targetR, dg = g - targetG, db = b - targetB;
+            let distance = Math.sqrt(dr * dr + dg * dg + db * db);
+            let threshold = 60; // Adjust this value if needed
+            let rotiMessage = (distance < threshold) ? "yes a roti" : "not a roti";
+            resultElement.innerHTML += `<br>:${rotiMessage}`;
+            // ***** End of added color check *****
+        } else {
+            resultElement.innerHTML = `:no suitable contour found`;
+        }
+        cv.imshow('canvasOverlay', overlayMat);
+
+        // Hough Circle detection (if needed) and draw on final output
+        let circles = new cv.Mat();
+        cv.HoughCircles(
+            gray,
+            circles,
+            cv.HOUGH_GRADIENT,
+            1,
+            gray.rows / 8,
+            100,
+            50,
+            0,
+            0
+        );
+
+        if (circles.cols > 0) {
+            for (let i = 0; i < circles.cols; ++i) {
+                let x = circles.data32F[i * 3];
+                let y = circles.data32F[i * 3 + 1];
+                let radius = circles.data32F[i * 3 + 2];
+                cv.circle(src, new cv.Point(x, y), radius, new cv.Scalar(255, 0, 0, 255), 2);
+            }
+        }
+        cv.imshow('canvasOutput', src);
+
+        // Cleanup
+        circles.delete();
+        src.delete();
+        gray.delete();
+        edges.delete();
+        hierarchy.delete();
+        contours.delete();
+        overlayMat.delete();
+        mat.delete();
+    }
+</script>
+</body>
+</html>
